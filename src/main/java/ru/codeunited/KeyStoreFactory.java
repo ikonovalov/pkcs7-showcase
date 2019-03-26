@@ -7,17 +7,17 @@ import java.security.KeyStore;
 import java.security.cert.X509Certificate;
 import java.util.UUID;
 
-public class KeyStoreFactory {
+class KeyStoreFactory {
 
     private static final KeyStoreFactory INSTANCE = new KeyStoreFactory();
 
     private static final String PROVIDER = "BC";
 
-    public static KeyStoreFactory getInstance() {
+    static KeyStoreFactory getInstance() {
         return INSTANCE;
     }
 
-    public KeyStore newKeyStore(
+    KeyStore newKeyStore(
             String keyAlias,
             char[] keystorePassword,
             char[] keyPassword,
@@ -34,7 +34,7 @@ public class KeyStoreFactory {
         return keystore;
     }
 
-    public KeyStore newKeyStoreSHA256WithRSA2048(
+    KeyStore newKeyStoreSHA256WithRSA2048(
             String keyAlias,
             char[] keystorePassword,
             char[] keyPassword) throws Exception {

@@ -16,7 +16,7 @@ import sun.misc.BASE64Encoder;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
-import java.security.*;
+import java.security.Security;
 import java.security.cert.CertificateException;
 import java.security.cert.X509Certificate;
 import java.util.Arrays;
@@ -35,48 +35,107 @@ public class CMS {
 
     public static void main(String[] args) throws Exception {
 
+        byte[] transmissionChannel = null;
 
         // Signer 1
-        Organization org1 = new Organization();
-        X509Certificate cert1 = org1.cert();
-        SignerInfoGenerator siGen1 = org1.createSignerInfoGenerator();
+        {
+            Organization org1 = new Organization();
+            X509Certificate cert1 = org1.cert();
 
-        // Signer 2
-        Organization org2 = new Organization();
-        X509Certificate cert2 = org2.cert();
-        SignerInfoGenerator siGen2 = org2.createSignerInfoGenerator(() -> {
-                    ASN1EncodableVector v = new ASN1EncodableVector();
-                    v.add(new Attribute(new ASN1ObjectIdentifier("1.2.643.113549.1.9"), new DERSet(new DEROctetString(new byte[]{1, 2, 3}))));
-                    AttributeTable extra = new AttributeTable(v);
-                    return new DefaultSignedAttributeTableGenerator(extra);
-                },
-                () -> null);
-
-        X509Certificate[] certs = new X509Certificate[]{cert1, cert2};
-        SignerInfoGenerator[] siGenerator = new SignerInfoGenerator[]{siGen1, siGen2};
-
-        CMSSignedData sigData = signData(myXml.getBytes(UTF_8), certs, siGenerator);
-
-        BASE64Encoder encoder = new BASE64Encoder();
-
-        String signedContent = encoder.encode((byte[]) sigData.getSignedContent().getContent());
-        System.out.println("(" + signedContent.length() + ") Content: " + signedContent + "\n");
-
-        String envelopedData = encoder.encode(sigData.getEncoded());
-        System.out.println("(" + envelopedData.length() + ") SignedData: " + envelopedData);
+            SignerInfoGenerator siGen1 = org1.createSignerInfoGenerator();
 
 
-        // READ CONTENT
-        byte[] incomingContent = sigData.getEncoded();
-        System.out.println("\n" + readContent(incomingContent));
+            X509Certificate[] certs = new X509Certificate[]{cert1};
+            SignerInfoGenerator[] siGenerator = new SignerInfoGenerator[]{siGen1};
+
+            CMSSignedData sigData = signData(myXml.getBytes(UTF_8), certs, siGenerator);
+
+            BASE64Encoder encoder = new BASE64Encoder();
+
+            String signedContent = encoder.encode((byte[]) sigData.getSignedContent().getContent());
+            System.out.println("(" + signedContent.length() + ") Content: " + signedContent + "\n");
+
+            String envelopedData = encoder.encode(sigData.getEncoded());
+            System.out.println("(" + envelopedData.length() + ") SignedData: " + envelopedData);
+            byte[] incomingContent = sigData.getEncoded();
+            transmissionChannel = incomingContent;
+
+        }
+
+        // TRANSFER SOME BYTES VIA transmissionChannel
+
+        // ================================================================================================
+        // Second signer
+        {
+            System.out.println("\n" + readContent(transmissionChannel));
+
+            CMSSignedData cms = signedDataFrom(transmissionChannel);
+            CMSTypedData cmsData = cms.getSignedContent();
+
+            // Signer 2
+            Organization org2 = new Organization();
+            X509Certificate cert2 = org2.cert();
+
+            CMSSignedDataGenerator cmsGenerator = new CMSSignedDataGenerator();
+
+            SignerInfoGenerator siGen2 = org2.createSignerInfoGenerator(
+                    () -> { // signed attributes
+                        ASN1EncodableVector v = new ASN1EncodableVector();
+                        v.add(new Attribute(new ASN1ObjectIdentifier("1.2.643.113549.1.9.9"), new DERSet(new DEROctetString(new byte[]{1, 2, 3}))));
+                        AttributeTable extra = new AttributeTable(v);
+                        return new DefaultSignedAttributeTableGenerator(extra);
+                    },
+                    () -> { // unsigned attributes
+
+                        // FIXME: IT WORKS INCORRECTLY
+                        // counter signature
+                        /*
+                        SignerInformation origSigner = (SignerInformation) cms.getSignerInfos().getSigners().toArray()[0];
+                        SignerInformationStore counterSignature = null;
+                        try {
+                            counterSignature = cmsGenerator.generateCounterSigners(origSigner);
+                        } catch (CMSException e) {
+                            e.printStackTrace();
+                        }
+                        SignerInformation counterSig = SignerInformation.addCounterSigners(origSigner, counterSignature);
+                        AttributeTable extra = new AttributeTable(new Attribute(CMSAttributes.counterSignature, new DERSet(counterSig.toASN1Structure())));
+                        return new SimpleAttributeTableGenerator(extra);
+                        */
+                        return null;
+                    });
+
+
+            // restore old ============
+            cmsGenerator.addSigners(cms.getSignerInfos());
+            cmsGenerator.addCertificates(cms.getCertificates());
+            // ========================
+
+            cmsGenerator.addSignerInfoGenerator(siGen2);
+
+            Store<X509Certificate> certsStore = new JcaCertStore(
+                    Arrays.asList(new X509Certificate[]{cert2})
+            );
+            cmsGenerator.addCertificates(certsStore);
+
+            CMSSignedData regenerated = cmsGenerator.generate(cmsData, true);
+            verify(regenerated);
+            System.out.println("Done");
+
+        }
+
 
     }
 
     private static String readContent(byte[] signedData) throws IOException, CMSException {
-        ByteArrayInputStream inputStream = new ByteArrayInputStream(signedData);
-        ASN1InputStream asnInputStream = new ASN1InputStream(inputStream);
-        CMSSignedData cmsSignedData = new CMSSignedData(ContentInfo.getInstance(asnInputStream.readObject()));
+        CMSSignedData cmsSignedData = signedDataFrom(signedData);
 
+        verify(cmsSignedData);
+
+        byte[] byteContent = (byte[]) cmsSignedData.getSignedContent().getContent();
+        return new String(byteContent, UTF_8);
+    }
+
+    private static void verify(CMSSignedData cmsSignedData) {
         Store<X509CertificateHolder> certificates = cmsSignedData.getCertificates();
 
         System.out.println("\n\n");
@@ -88,20 +147,25 @@ public class CMS {
             Iterator<X509CertificateHolder> matches = certificates.getMatches(certSelector).iterator();
             boolean verified;
             try {
-                verified = signer.verify(new JcaSimpleSignerInfoVerifierBuilder().setProvider("BC").build(matches.next()));
+                X509CertificateHolder certHolder = matches.next();
+                System.out.println(certHolder.getSubject());
+                verified = signer.verify(new JcaSimpleSignerInfoVerifierBuilder().setProvider("BC").build(certHolder));
             } catch (CMSException | OperatorCreationException | CertificateException e) {
                 e.printStackTrace();
                 verified = false;
             }
 
-            System.out.println((verified ? "VALID" : "INVALID") + " <= Signature: " + Base64.getEncoder().encodeToString(
-                    signer.toASN1Structure().getEncryptedDigest().getOctets()
-            ));
+            byte[] signatureOctets = signer.toASN1Structure().getEncryptedDigest().getOctets();
+            String valStr = verified ? "VALID" : "INVALID";
+            System.out.println(valStr + " <= Signature: " + Base64.getEncoder().encodeToString(signatureOctets));
         });
         System.out.println("\n\n");
+    }
 
-        byte[] byteContent = (byte[]) cmsSignedData.getSignedContent().getContent();
-        return new String(byteContent, UTF_8);
+    private static CMSSignedData signedDataFrom(byte[] signedData) throws CMSException, IOException {
+        ByteArrayInputStream inputStream = new ByteArrayInputStream(signedData);
+        ASN1InputStream asnInputStream = new ASN1InputStream(inputStream);
+        return new CMSSignedData(ContentInfo.getInstance(asnInputStream.readObject()));
     }
 
     private static CMSSignedData signData(byte[] data, X509Certificate[] signingCertificate, SignerInfoGenerator[] generators) throws Exception {
